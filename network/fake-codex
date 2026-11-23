@@ -1,0 +1,23 @@
+#!/bin/sh
+# A stand-in for the Codex CLI that answers every task with the nonce it was
+# sent, so the network check needs no model or sign-in. It speaks only what
+# agentiscaled's codex runtime uses: --version, and `exec ... --json
+# --output-last-message FILE -` with the prompt on stdin.
+set -eu
+if [ "${1:-}" = "--version" ]; then
+	echo "codex-cli 0.0.0-network-check"
+	exit 0
+fi
+[ "${1:-}" = "exec" ] || { echo "fake-codex: unsupported command: $*" >&2; exit 2; }
+last=
+while [ $# -gt 0 ]; do
+	if [ "$1" = "--output-last-message" ]; then
+		last=$2
+		shift
+	fi
+	shift
+done
+[ -n "$last" ] || { echo "fake-codex: no --output-last-message" >&2; exit 2; }
+nonce=$(grep -o 'network-check-[0-9a-f]*' | head -n 1 || true)
+echo '{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000000"}'
+printf '{"status":"done","text":"echo %s"}\n' "$nonce" >"$last"

@@ -1,0 +1,141 @@
+name: Real network
+
+# The latest agentiscaled release, as users install it, joins a network kept
+# for this check and calls an agent between two nodes (network/run.sh),
+# then the GitHub Action users join with (whiteredhouse/agentiscale-action)
+# joins one more node. It reaches the service as any user
+# does, through the public control service.
+#
+# No secret is stored: each node joins with an OIDC token GitHub issues to
+# the job, which the network trusts only for this workflow on main, in the
+# network-check environment, on schedule or dispatch. Pull requests run the
+# parts that need no network. See network/README.md.
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release to check (vX.Y.Z), or latest
+        required: true
+        default: latest
+        type: string
+      nodes:
+        description: Nodes to join, 2 to 20 (more than 2 skips the action job; check the trust's cap first)
+        required: true
+        default: '2'
+        type: string
+  pull_request:
+    paths: ['network/**', '.github/workflows/network.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: network-check
+  cancel-in-progress: false
+
+jobs:
+  parts:
+    name: Check parts (no network)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Scripts parse
+        run: |
+          bash -n network/run.sh
+          sh -n network/fake-codex
+          shellcheck network/run.sh
+      - name: Stand-in agent and answer check
+        run: python3 -I network/test_parts.py
+
+  nodes:
+    name: Two nodes call an agent
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: network-check
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Resolved once, so the action job checks the same release even if
+      # a newer one lands in between.
+      - name: Resolve the release
+        id: release
+        env:
+          VERSION: ${{ inputs.version || 'latest' }}
+        run: |
+          if [ "$VERSION" = latest ]; then
+            VERSION=$(curl -sSfI --retry 3 https://github.com/whiteredhouse/agentiscaled/releases/latest |
+              tr -d '\r' | sed -n 's|^[Ll]ocation: .*/tag/||p')
+          fi
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Not a release: '$VERSION'"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Checking agentiscaled $VERSION"
+      - name: Need the network's ID
+        env:
+          NETWORK: ${{ vars.AGENTISCALE_CI_NETWORK }}
+        run: |
+          if [ -z "$NETWORK" ]; then
+            echo "::error::Set the variable AGENTISCALE_CI_NETWORK in the network-check environment (see network/README.md)"
+            exit 1
+          fi
+      - name: Join and call an agent between two nodes
+        env:
+          AGENTISCALE_CI_NETWORK: ${{ vars.AGENTISCALE_CI_NETWORK }}
+          AGENTISCALE_MESH_DOMAIN: ${{ vars.AGENTISCALE_MESH_DOMAIN }}
+          NETWORK_CHECK_DIR: ${{ runner.temp }}/network
+          NETWORK_CHECK_NODES: ${{ inputs.nodes || '2' }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: bash network/run.sh "$VERSION"
+      - name: Keep the node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-check-logs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/network/*.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # The GitHub Action users join with joins one more node under the same
+  # trust and waits until it is connected. Skipped on a bigger run by hand, which
+  # can take the trust's whole cap.
+  action:
+    needs: nodes
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && (inputs.nodes || '2') == '2'
+    runs-on: ubuntu-latest
+    environment: network-check
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 5
+    steps:
+      - uses: whiteredhouse/agentiscale-action@5baf3e307b456af901a5d338bd6710f4ea536044 # v1.0.0
+        id: agentiscale
+        with:
+          network-id: ${{ vars.AGENTISCALE_CI_NETWORK }}
+          version: ${{ needs.nodes.outputs.version }}
+      - name: The node is connected
+        env:
+          DATA_DIR: ${{ steps.agentiscale.outputs.data-dir }}
+          PEER: ${{ steps.agentiscale.outputs.peer-id }}
+          MESH_DOMAIN: ${{ vars.AGENTISCALE_MESH_DOMAIN || 'c1.mesh.agentiscale.net' }}
+        run: |
+          agentiscaled status -data-dir "$DATA_DIR" | tee "$RUNNER_TEMP/status"
+          grep -q '^Mesh connection: connected' "$RUNNER_TEMP/status"
+          grep -qF ".$MESH_DOMAIN" "$RUNNER_TEMP/status"
+          test -n "$PEER"
