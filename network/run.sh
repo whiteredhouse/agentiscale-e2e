@@ -143,8 +143,13 @@ start_node() {
 
 # The agent's own (isolated) Codex configuration needs a sign-in file; the
 # stand-in never reads it.
-mkdir -p "$work/callee/codex" "$work/agent"
-echo '{}' >"$work/callee/codex/auth.json"
+# Releases before v0.16.0 keep it in <data-dir>/codex, later ones in the
+# agent's own profile, <data-dir>/agents/<name>/profile.
+for profile in "$work/callee/codex" "$work/callee/agents/$agent/profile"; do
+	mkdir -p "$profile"
+	echo '{}' >"$profile/auth.json"
+done
+mkdir -p "$work/agent"
 start_node callee "" -agent codex -agent-command /work/bin/codex -agent-name "$agent" \
 	-agent-dir /work/agent -agent-owner-config=false -agent-dir-instructions=false -agent-dir-skills=false
 start_node caller
